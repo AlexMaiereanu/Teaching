@@ -21,6 +21,8 @@ class Parser(input: String) {
   
   // does input start with s at current position?
   private def startsWith(s: String) = pos+s.length <= length && input.substring(pos, pos+s.length) == s
+  // does input start with a certain character  
+  private def startsWith(is: Char => Boolean) = pos < length && is(input(pos))
   
   // *********************** low-level parsing function that actually inspect the input
   
@@ -45,12 +47,11 @@ class Parser(input: String) {
   // parse some characters (as long as they satisfy a condition) and return them
   private def parseCertainCharacters(take: Char => Boolean): String = {
     parseWhitespace
-    var l = 0
-    while (pos+l < length && take(input(pos+l))) {
-      l += 1
+    val p = pos
+    while (pos < length && take(input(pos))) {
+       pos += 1
     }
-    val n = input.substring(pos, pos+l)
-    pos += l
+    val n = input.substring(p, pos)
     n
   }
   
@@ -115,6 +116,8 @@ class Parser(input: String) {
    
   def parseDecl: Decl = {
     parseWhitespace
+    if (endOfInput)
+      throw Error("no declaration found")
     if (startsWith("\n")) {
       // skip empty line
       parseTerminal("\n")
@@ -127,6 +130,12 @@ class Parser(input: String) {
     else if (startsWith("var ")) {
       parseTerminal("var")
       parseVar
+    } else if (startsWith("data ")) {
+      parseTerminal("data")
+      parseIDT
+    } else if (startsWith("class ")) {
+      parseTerminal("class")
+      parseADT
     } else {
       val tm = parseTerm
       Command(tm)
@@ -136,23 +145,74 @@ class Parser(input: String) {
   // auxiliary function of parseDecl
   private def parseVal: Val = {
     val n = parseName
-    parseTerminal(":")
-    val t = parseType
+    parseWhitespace
+    val tO = if (startsWith(":")) {
+       parseTerminal(":")
+       Some(parseType)
+    } else
+      None
     parseTerminal("=")
     val v = parseTerm
-    Val(n,t,Some(v))
+    Val(n,tO,Some(v))
   }
    
   // auxiliary function of parseDecl
   private def parseVar: Var = {
     val n = parseName
-    parseTerminal(":")
-    val t = parseType
+    parseWhitespace
+    val tO = if (startsWith(":")) {
+       parseTerminal(":")
+       Some(parseType)
+    } else
+      None
     parseTerminal("=")
     val v = parseTerm
-    Var(n,t,v)
+    Var(n,tO,v)
   }
-
+  
+  private def parseIDT: IDTDecl = {
+    val n = parseName
+    parseTerminal("{")
+    val cons = parseList(() => parseCons, "|")
+    parseTerminal("}")
+    IDTDecl(n, cons)
+  }
+  private def parseCons: Cons = {
+    val n = parseName
+    parseTerminal("(")
+    val t = parseType
+    parseTerminal(")")
+    Cons(n,t)
+  }
+  private def parseCase: ConsCase = {
+    val n = parseName
+    parseTerminal("(")
+    val x = parseName
+    parseTerminal(")")
+    parseTerminal("=>")
+    val b = parseTerm
+    ConsCase(n,x,None,b)
+  }
+  
+  private def parseADT: ADTDecl = {
+    val n = parseName
+    parseTerminal("{")
+    val fields = parseList(() => parseField, ",")
+    parseTerminal("}")
+    ADTDecl(n, fields)
+  }
+  private def parseField: Field = {
+    val n = parseName
+    parseTerminal(":")
+    val t = parseType
+    Field(n,t)
+  }
+  private def parseDef: FieldDef = {
+    val n = parseName
+    parseTerminal("=")
+    val t = parseTerm
+    FieldDef(n,None,t)
+  }
   
   def parseType: Type = {
     parseWhitespace
@@ -169,6 +229,7 @@ class Parser(input: String) {
       val n = parseNameCharacters
       // some names are predefined, everything else is a TypeRef
       n match {
+        case "unit" => Unit()
         case "int" => Int()
         case "bool" => Bool()
         case n =>
@@ -200,16 +261,24 @@ class Parser(input: String) {
     if (endOfInput)
       throw Error("no term found")
     val c = input(pos)
-    val tm = if (c == '(') {
-      // bracketed term
+    var tm = if (c == '(') {
       parseTerminal("(")
-      val tm = parseTerm
-      parseTerminal(")")
-      tm
-    } else if (c.isDigit) {
+      if (startsWith(")")) {
+        parseTerminal(")")
+        UnitLit()
+      } else {
+        // bracketed term
+        val tm = parseTerm
+        // TODO check for , here to parse pairs (t,t)
+        parseTerminal(")")
+        tm
+      }
+    } else if (c == '-' || c.isDigit) {
       // integer literal
+      if (c == '-')
+        parseTerminal("-")
       val i = parseDigits.toInt
-      IntLit(i)
+      if (c == '-') IntLit(-i) else IntLit(i)
     } else if (c == '"') {
       // string literal
       ??? //TODO for strings
@@ -242,18 +311,37 @@ class Parser(input: String) {
           val t = parseTerm
           parseTerminal(")")
           Print(t)
+        case "new" =>
+          val a = parseName
+          parseTerminal("{")
+          val defs = parseList(() => parseDef, ",")
+          parseTerminal("}")
+          New(a, defs)
+        case "match" =>
+          val t = parseTerm
+          parseTerminal("{")
+          val cases = parseList(() => parseCase, "|")
+          parseTerminal("}")
+          Match(t, cases)
         case _ =>
           TermRef(Name(n))
       }
     }
     // we have a term now; we check what comes next to decide if we should parse more 
     parseWhitespace
-    if (startsWith(".")) {
-      // projections out of tm
+    while (startsWith(".")) {
+      // projections out of tm or field access
       parseTerminal(".")
-      val n = parseDigits
-      ??? //TODO for product types
-    } else if (startsWith("(")) {
+      if (startsWith(c => c.isDigit)) {
+    	  val n = parseDigits
+    		??? //TODO for product types
+      } else {
+        val n = parseName
+        tm = FieldAccess(tm, n)
+      }
+    }
+    parseWhitespace
+    if (startsWith("(")) {
       // function application of tm
       parseTerminal("(")
       val arg = parseTerm
@@ -262,20 +350,23 @@ class Parser(input: String) {
     } else if (startsWith("[")) {
       // TODO for type arguments
       ???
-    } else if (startsWith(":")) {
+    } else if (startsWith(":") || startsWith("=>")) {
       // lambda abstraction, but only if tm is a variable
       tm match {
         case TermRef(x) =>
-          parseTerminal(":")
-          val tp = parseType
+          val tpO = if (startsWith(":")) {
+             parseTerminal(":")
+             Some(parseType)
+          } else
+            None
           parseTerminal("=>")
           val body = parseTerm
-          Lambda(x,tp,body)
+          Lambda(x,tpO,body)
         case _ =>
           tm
       }
     } else {
-      // check if an infix operator follows 
+      // check if an infix operator follows
       Operator.builtInInfixOperators.find(startsWith) match {
         case Some(op) =>
           // infix operator

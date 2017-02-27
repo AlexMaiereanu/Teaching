@@ -58,9 +58,8 @@ sealed abstract class Decl {
   def name: Name
 }
 /** variable definition; value is omitted for local assumptions */
-case class Val(name: Name, tp: Type, value: Option[Term]) extends Decl
+case class Val(name: Name, tp: Option[Type], value: Option[Term]) extends Decl
 // no type definitions---that makes the language harder to implement
-//TODO data types if you feel ambitious
 
 /** types */
 sealed abstract class Type
@@ -89,7 +88,7 @@ case class Operator(op: String, args: List[Term]) extends Term
 case class LocalDecl(decl: Decl, term: Term) extends Term
 
 /** lambda abstraction */
-case class Lambda(argName: Name, argType: Type, body: Term) extends Term
+case class Lambda(argName: Name, argType: Option[Type], body: Term) extends Term
 
 /** function application */
 case class Apply(fun: Term, args: Term) extends Term
@@ -99,10 +98,15 @@ case class Apply(fun: Term, args: Term) extends Term
 
 object Operator {
   /** the list of infix operators */
-  def builtInInfixOperators = List(",", "+", "-", "*", "div", "mod", "&&", "||", "==", "!=", "<=", ">=")
+  def builtInInfixOperators = List("+", "-", "*", "div", "mod", "&&", "||", "==", "!=", "<=", ">=", "<", ">")
 }
 
-// *********************************************
+// ********************************************* everything below this line contains extensions to make a programming language
+// ********************************************* all the case distinctions in the other components use the same marker
+// ********************************************* you can ignore those parts on a first read
+
+// Disclaimer: I'm trying to implement this both systematically and easily-understandable.
+//  That's very hard to combine, and I take some shortcuts that make some other things trickier.
 
 /** commands, i.e., expressions in declaration-position that are executed for their side-effect */
 case class Command(term: Term) extends Decl {
@@ -110,7 +114,7 @@ case class Command(term: Term) extends Decl {
 }
 
 /** variable declarations */
-case class Var(name: Name, tp: Type, initalvalue: Term) extends Decl
+case class Var(name: Name, tp: Option[Type], init: Term) extends Decl
 
 /** mutable variables */
 case class LocationType(tp: Type) extends Type
@@ -123,3 +127,27 @@ case class Print(term: Term) extends Term
 /** possible non-termination */
 case class While(cond: Term, body: Term) extends Term
 
+
+/** type assumptions, needed for IDTDecl and ADTDecl */
+case class TypeDecl(name: Name) extends Decl
+
+// ************************ a very simple language for inductive data types
+case class IDTDecl(name: Name, constructors: List[Cons]) extends Decl
+case class Cons(name: Name, argType: Type)
+
+case class ConsApply(name: Name, argument: Term) extends Term
+
+case class Match(term: Term, cases: List[ConsCase]) extends Term
+case class ConsCase(name: Name, patvar: Name, argType: Option[Type], body: Term)
+
+// ************************ a very simple language for abstract data types (classes)
+case class ADTDecl(name: Name, fields: List[Field]) extends Decl
+case class Field(name: Name, tp: Type)
+
+case class New(cls: Name, definitions: List[FieldDef]) extends Term
+case class FieldDef(name: Name, tp: Option[Type], definition: Term)
+
+/** run-time representation of a New */
+case class Instance(cls: Name, definitions: Context) extends Term
+
+case class FieldAccess(instance: Term, field: Name) extends Term

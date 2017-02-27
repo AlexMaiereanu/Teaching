@@ -11,17 +11,16 @@ object Interpreter {
   
   // interpret all value definitions in order
   def interpretContext(context: Context, c: Context): Context = {
-    val declsI = interpretDeclList(context, c.decls)
+    val declsI = interpretDeclList(context, c.decls, Nil)
     Context(declsI)
   }
 
   // auxiliary functions of interpretContext
-  private def interpretDeclList(context: Context, decls: List[Decl]): List[Decl] = decls match {
-    case Nil => Nil
+  private def interpretDeclList(context: Context, decls: List[Decl], sofar: List[Decl]): List[Decl] = decls match {
+    case Nil => sofar.reverse
     case hd::tl =>
       val hdI = interpretDecl(context, hd)
-      val tlI = interpretDeclList(context.and(hdI), tl)
-      hdI :: tlI
+      interpretDeclList(context.and(hdI), tl, hdI::sofar)
   }
   
   // interpret the definition of a value
@@ -35,13 +34,17 @@ object Interpreter {
     }
     
     // ***************************
+    case TypeDecl(a) => decl
+    case IDTDecl(a, cs) => decl  // no term in constructors
+    case ADTDecl(a, fs) => decl  // no term in fields
     case Command(tm) =>
       val tmI = interpretTerm(context, tm)
       Command(tmI) // can usually be thrown away
-    case Var(x, a, v) =>
+    case Var(x, aO, v) =>
       val vI = interpretTerm(context, v)
-      val loc = new Location(x, a, v)
-      Val(x, LocationType(a), Some(loc))
+      val loc = new Location(x, aO.get, vI) //TODO check this
+      val ltO = aO.map(a => LocationType(a))
+      Val(x, ltO, Some(loc))
   }
   
   // interpret a term by expanding all definitions and running functions
@@ -57,21 +60,40 @@ object Interpreter {
           case Command(_) =>
             throw Error("unexpected command") // impossible because commands are anonymous
           case Var(_,_,_) =>
-            throw Error("unexpected variable declaration: " + n) // impossible because interpretDecl turns Var's into Val's
+            throw Error("unexpected variable declaration: " + n.name) // impossible because interpretDecl turns Var's into Val's
+          case _: ADTDecl | _: IDTDecl | _: TypeDecl =>
+            throw Error("not a term") // impossible for well-formed terms
         }
         case None =>
-          throw Error("unknown name: " + n) // impossible for well-formed terms
+          throw Error("unknown name: " + n.name) // impossible for well-formed terms
       }
     // nothing to do for literals
     case UnitLit() | IntLit(_) | BoolLit(_) => tm
     // apply operators: interpret all arguments left to right; if that returns only literals, apply the corresponding Scala operator
     case Operator(op, args) =>
+      // TODO short-circuit evaluation
       val argsI = args.map(a => interpretTerm(context, a))
       val tmI = Operator(op, argsI)
       tmI match {
-        case Operator("+", List(IntLit(i),IntLit(j))) => IntLit(i+j)
         case Operator("==", List(a,b)) => BoolLit(a == b)
         case Operator("!=", List(a,b)) => BoolLit(a != b)
+        case Operator(op, List(IntLit(i),IntLit(j))) =>
+          op match {
+            case "+" => IntLit(i+j)
+            case "-" => IntLit(i-j)
+            case "*" => IntLit(i*j)
+            case "mod" => IntLit(i % j)
+            case "div" => IntLit(i / j)
+            case "<=" => BoolLit(i <= j)
+            case ">=" => BoolLit(i >= j)
+            case "<" => BoolLit(i < j)
+            case ">" => BoolLit(i > j)
+          }
+        case Operator(op, List(BoolLit(b), BoolLit(c))) =>
+          op match {
+            case "&&" => BoolLit(b && c)
+            case "||" => BoolLit(b || c)
+          }
         case _ => tmI //TODO
       }
       
@@ -84,6 +106,9 @@ object Interpreter {
         // ***********************
         case Var(_,_,_) => true              // Var's have become defined Val's in dI
         case Command(_) => true              // Command's can never be referred to anyway
+        case TypeDecl(_) => false
+        case IDTDecl(_,_) => false
+        case ADTDecl(_,_) => false
       }
       if (canContract) {
          tI
@@ -94,22 +119,51 @@ object Interpreter {
     // this part is very difficult; the behavior given here is just a very simple solution; there is lots of research on how to do it better
     // in particular, if side-effects are possible, we must not interpret the body of a function before it is called
 
-    case Lambda(x,a,t) =>
+    case Lambda(x,aO,t) =>
       // cannot evaluate a function recursively
       // instead, close it by expanding all references to the context
-      val tI = Closer.closeTerm(context.and(Val(x,a,None)), t)
-      Lambda(x,a,tI)
+      val tI = Closer.closeTerm(context.and(Val(x,aO,None)), t) // type is always present for checked terms
+      Lambda(x,aO,tI)
 
     case Apply(fun,arg) =>
       // if the function is a Lambda, define its argument variable and interpret the body
       val funI = interpretTerm(context, fun)
       val argI = interpretTerm(context, arg)
       funI match {
-        case Lambda(x,a,t) =>
-          interpretTerm(context.and(Val(x,a,Some(argI))), t)
+        case Lambda(x,aO,t) =>
+          interpretTerm(context.and(Val(x,aO,Some(argI))), t)
         case _ => Apply(funI, argI) // should not happen
       }
       
+    // ********************************
+    case ConsApply(c, arg) =>
+      ConsApply(c, interpretTerm(context, arg))
+    case Match(t, cases) =>
+      val tI = interpretTerm(context, t)
+      tI match {
+        case ConsApply(con, arg) =>
+          cases.find(c => c.name == con) match {
+            case Some(cas) =>
+              interpretTerm(context.and(Val(cas.patvar, cas.argType, Some(arg))), cas.body)
+            case None =>
+              throw Error("missing case in pattern-match") // impossible for well-formed terms
+          }
+        case _ => Match(tI, cases) // should not happen
+      }
+    case New(a, defs) =>
+      val asContext = defs.map(d => Var(d.name, d.tp, d.definition))
+      val defsI = interpretContext(context, Context(asContext))
+      Instance(a, defsI)
+    case Instance(_,_) => tm
+      
+    case FieldAccess(t, f) =>
+      val tI = interpretTerm(context, t)
+      tI match {
+        case Instance(a, defs) =>
+          interpretTerm(context.and(defs.decls), TermRef(f))
+        case _ => FieldAccess(tI, f) // should not happen
+      }
+
     // ********************************
     case loc: Location =>
       loc.value
@@ -153,6 +207,9 @@ object Closer {
         case None => None
       }
       Val(x, a, vC)
+    case TypeDecl(_) => decl
+    case ADTDecl(a, fs) => decl  // no terms may occur in fields at this point
+    case IDTDecl(a, cs) => decl  // no terms may occur in constructors at this point
     case Command(tm) => 
       val tmC = closeTerm(context, tm)
       Command(tmC)
@@ -183,14 +240,31 @@ object Closer {
       val tC = closeTerm(context.and(dC), t)
       LocalDecl(dC, tC)
 
-    case Lambda(x,a,t) =>
-      val tC = closeTerm(context.and(Val(x,a,None)), t)
-      Lambda(x,a,tC)
+    case Lambda(x,aO,t) =>
+      val tC = closeTerm(context.and(Val(x,aO,None)), t)
+      Lambda(x,aO,tC)
     case Apply(fun,arg) =>
       // if the function is a Lambda, define its argument variable and close the body
       val funC = closeTerm(context, fun)
       val argC = closeTerm(context, arg)
       Apply(funC, argC)
+
+    case ConsApply(c, arg) => ConsApply(c, closeTerm(context, arg))
+    case Match(t, cases) =>
+      val tC = closeTerm(context, t)
+      val casesC = cases.map {c =>
+        val bodyC = closeTerm(context.and(Val(c.patvar, c.argType, None)), c.body)
+        ConsCase(c.name, c.patvar, c.argType, bodyC)
+      }
+      Match(tC, casesC)
+    case New(a, defs) =>
+      val defsC = defs.map {d =>
+        FieldDef(d.name, d.tp, closeTerm(context, d.definition))
+      }
+      New(a, defsC)
+    case Instance(a, defs) => tm
+    
+    case FieldAccess(t, f) => FieldAccess(closeTerm(context, t), f)
 
     case loc: Location =>
       loc
