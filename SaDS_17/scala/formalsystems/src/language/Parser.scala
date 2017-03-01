@@ -229,6 +229,7 @@ class Parser(input: String) {
       val n = parseNameCharacters
       // some names are predefined, everything else is a TypeRef
       n match {
+        case "void" => Void()
         case "unit" => Unit()
         case "int" => Int()
         case "bool" => Bool()
@@ -290,6 +291,10 @@ class Parser(input: String) {
       val t = parseTerm
       parseTerminal("}")
       LocalDecl(d, t)
+    } else if (c == '!') {
+      parseTerminal("!")
+      val t = parseTerm
+      Operator("!", List(t))
     } else {
       // name, some names are predefined or special, everything else is a TermRef
       val n = parseNameCharacters
@@ -299,7 +304,13 @@ class Parser(input: String) {
         case "false" =>
           BoolLit(false)
         case "if" =>
-          ??? //TODO
+          parseTerminal("(")
+          val c = parseTerm
+          parseTerminal(")")
+          val t = parseTerm
+          parseTerminal("else")
+          val e = parseTerm
+          If(c,t,e)
         case "while" =>
           parseTerminal("(")
           val cond = parseTerm
@@ -323,6 +334,19 @@ class Parser(input: String) {
           val cases = parseList(() => parseCase, "|")
           parseTerminal("}")
           Match(t, cases)
+        case "break" => Break()
+        case "continue" => Continue()
+        case "return" =>
+          val r = parseTerm
+          Return(r)
+        case "throw" =>
+          val e = parseTerm
+          Throw(e)
+        case "try" =>
+          val t = parseTerm
+          parseTerminal("catch")
+          val h = parseTerm
+          Try(t,h)
         case _ =>
           TermRef(Name(n))
       }

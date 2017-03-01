@@ -1,10 +1,46 @@
 package language
 
-/** interpretN interprets all terms in object of non-terminal N
+class SimpleLocation(var value: Term) extends Location
+
+/** a simple environment that delegates to the underlying JVM */
+class Environment {
+  /** run-time errors */
+  case class Error(msg: String) extends java.lang.Exception(msg)
+
+  def add(t: Term) = new SimpleLocation(t)
+  def update(loc: Location, t: Term) {
+     loc match {
+       case loc: SimpleLocation => loc.value = t
+       case _ => throw Error("unknown location") // impossible
+     }
+  }
+  def get(loc: Location): Term =  {
+     loc match {
+       case loc: SimpleLocation => loc.value
+       case _ => throw Error("unknown location") // impossible
+     }
+  }
+  
+  /** garbage collection is inherited from the JVM */
+  def delete(loc: Location) {}
+  
+  def out(t: Term ) {
+    println(Printer.printTerm(t))
+  }
+  
+  def in(): scala.Int = {
+     System.in.read()
+  }
+}
+
+/**
+ * interpretN interprets all terms in object of non-terminal N
+ * 
+ * state-sensitive or state-affecting terms are interpreted relative to an environment 
  *  
  * precondition: input must be well-formed (Checker.checkN)
  */
-object Interpreter {  
+class Interpreter(env: Environment) {  
   
   /** run-time errors */
   case class Error(msg: String) extends java.lang.Exception(msg)
@@ -25,16 +61,20 @@ object Interpreter {
   
   // interpret the definition of a value
   def interpretDecl(context: Context, decl: Decl): Decl = decl match {
-    case Val(x,a,vOpt) => vOpt match {
-      case Some(v) =>
-        val vI = interpretTerm(context, v)
-        Val(x,a,Some(vI))
-      case None =>
-        Val(x,a,None)
-    }
+    case Val(x,aOpt,vOpt) =>
+      val aI = aOpt.map(a => interpretType(context, a))
+      vOpt match {
+        case Some(v) =>
+          val vI = interpretTerm(context, v)
+          Val(x,aI,Some(vI))
+        case None =>
+          Val(x,aI,None)
+      }
     
     // ***************************
-    case TypeDecl(a) => decl
+    case TypeDecl(a,vO) =>
+      val vI = vO.map(v => interpretType(context, v))
+      TypeDecl(a, vI)
     case IDTDecl(a, cs) => decl  // no term in constructors
     case ADTDecl(a, fs) => decl  // no term in fields
     case Command(tm) =>
@@ -42,9 +82,29 @@ object Interpreter {
       Command(tmI) // can usually be thrown away
     case Var(x, aO, v) =>
       val vI = interpretTerm(context, v)
-      val loc = new Location(x, aO.get, vI) //TODO check this
-      val ltO = aO.map(a => LocationType(a))
-      Val(x, ltO, Some(loc))
+      val loc = env.add(vI)
+      val ltO = aO.map(a => LocationType(interpretType(context, a)))
+      Var(x, ltO, loc)
+  }
+  
+  // interpret a type by expanding all definitions (nothing else is needed)
+  def interpretType(context: Context, tp: Type): Type = tp match {
+    case b: BaseType => b
+    case FunType(a,b) => FunType(interpretType(context, a), interpretType(context, b))
+    case TypeRef(n) => context.get(n) match {
+      case Some(d) => d match {
+        case TypeDecl(_, aO) => aO match {
+          case Some(a) => a
+          case None => tp
+        }
+        case IDTDecl(_,_) => tp
+        case ADTDecl(_,_) => tp
+        case _ => throw Error("not a types") // impossible for well-formed types
+      }
+      case None =>
+        throw Error("unknown name: " + n.name) // impossible for well-formed types
+    }
+    case LocationType(a) => LocationType(interpretType(context, a))
   }
   
   // interpret a term by expanding all definitions and running functions
@@ -54,13 +114,15 @@ object Interpreter {
         // replace n with its definition
         case Some(d) => d match {
           case Val(_,_,vOpt) => vOpt match {
-            case Some(v) => interpretTerm(context, v)
+            case Some(v) => v
             case None => tm
           }
           case Command(_) =>
             throw Error("unexpected command") // impossible because commands are anonymous
-          case Var(_,_,_) =>
-            throw Error("unexpected variable declaration: " + n.name) // impossible because interpretDecl turns Var's into Val's
+          case Var(_,_,loc) => loc match {
+            case loc: Location => env.get(loc)
+            case _ => throw Error("not a location") // impossible for well-formed terms
+          }
           case _: ADTDecl | _: IDTDecl | _: TypeDecl =>
             throw Error("not a term") // impossible for well-formed terms
         }
@@ -75,15 +137,21 @@ object Interpreter {
       val argsI = args.map(a => interpretTerm(context, a))
       val tmI = Operator(op, argsI)
       tmI match {
-        case Operator("==", List(a,b)) => BoolLit(a == b)
+        case Operator("==", List(a,b)) => BoolLit(a == b) //TODO better equality of functions
         case Operator("!=", List(a,b)) => BoolLit(a != b)
         case Operator(op, List(IntLit(i),IntLit(j))) =>
           op match {
             case "+" => IntLit(i+j)
             case "-" => IntLit(i-j)
             case "*" => IntLit(i*j)
-            case "mod" => IntLit(i % j)
-            case "div" => IntLit(i / j)
+            case "mod" =>
+              val m = i % j
+              val mFixed = if (m<0) m+j else m
+              IntLit(mFixed)
+            case "div" =>
+              val d = i / j
+              val dFixed = if (i % j < 0) d-1 else d
+              IntLit(dFixed)
             case "<=" => BoolLit(i <= j)
             case ">=" => BoolLit(i >= j)
             case "<" => BoolLit(i < j)
@@ -94,9 +162,16 @@ object Interpreter {
             case "&&" => BoolLit(b && c)
             case "||" => BoolLit(b || c)
           }
+        case Operator("!", List(BoolLit(b))) => BoolLit(!b)
         case _ => tmI //TODO
       }
-      
+    case If(c,t,e) =>
+      val cI = interpretBool(context, c)
+      if (cI) {
+        interpretTerm(context, t)
+      } else {
+        interpretTerm(context, e)
+      }
     case LocalDecl(d, t) =>
       val dI = interpretDecl(context, d)
       val tI = interpretTerm(context.and(dI), t)
@@ -104,13 +179,19 @@ object Interpreter {
       val canContract = d match {
         case Val(_,_,vOpt) => vOpt.isDefined // defined Val's have been expanded in tI
         // ***********************
-        case Var(_,_,_) => true              // Var's have become defined Val's in dI
+        case Var(_,_,_) => true              // Var's are expanded in tI
         case Command(_) => true              // Command's can never be referred to anyway
-        case TypeDecl(_) => false
+        case TypeDecl(_,vOpt) => vOpt.isDefined
         case IDTDecl(_,_) => false
         case ADTDecl(_,_) => false
       }
       if (canContract) {
+         dI match {
+           case Var(_,_,l: Location) =>
+             // deallocate local location
+             env.delete(l)
+           case _ =>
+         }
          tI
       } else {
          LocalDecl(dI, tI)
@@ -120,10 +201,11 @@ object Interpreter {
     // in particular, if side-effects are possible, we must not interpret the body of a function before it is called
 
     case Lambda(x,aO,t) =>
+      val aI = aO.map(a => interpretType(context, a))
       // cannot evaluate a function recursively
       // instead, close it by expanding all references to the context
       val tI = Closer.closeTerm(context.and(Val(x,aO,None)), t) // type is always present for checked terms
-      Lambda(x,aO,tI)
+      Lambda(x,aI,tI)
 
     case Apply(fun,arg) =>
       // if the function is a Lambda, define its argument variable and interpret the body
@@ -131,7 +213,11 @@ object Interpreter {
       val argI = interpretTerm(context, arg)
       funI match {
         case Lambda(x,aO,t) =>
-          interpretTerm(context.and(Val(x,aO,Some(argI))), t)
+          try {
+             interpretTerm(context.and(Val(x,aO,Some(argI))), t)
+          } catch {case ControlFlowMessage(Return(r)) =>
+             r
+          }
         case _ => Apply(funI, argI) // should not happen
       }
       
@@ -166,29 +252,61 @@ object Interpreter {
 
     // ********************************
     case loc: Location =>
-      loc.value
+      env.get(loc)
     case Assignment(x, v) =>
       val loc = x match {
         case TermRef(n) =>
           context.get(n) match {
-            case Some(Val(_,_,Some(l:Location))) => l
+            case Some(Var(_,_,l:Location)) => l
             case None => throw Error("unknown assignment target: " + n.name) // impossible for well-formed terms
             case _ => throw Error("unexpected assignment target: " + n.name)
           }
         case loc: Location => loc
         case l => throw Error("unexpected assignment target") // impossible for well-formed terms  
       }
-      loc.value = interpretTerm(context, v)
+      env.update(loc, interpretTerm(context, v))
       UnitLit()
     case While(c,b) =>
-      while (interpretTerm(context,c) == BoolLit(true)) {
-        interpretTerm(context, b)
+      if (interpretBool(context,c)) {
+        try {
+          interpretTerm(context, b)
+        } catch {
+          case ControlFlowMessage(Break()) =>
+            return UnitLit()
+          case ControlFlowMessage(Continue()) =>
+        }
+        interpretTerm(context, While(c,b))
+      } else {
+        UnitLit()
       }
-      UnitLit()
+    case Try(t, h) =>
+      try {
+        interpretTerm(context, t)
+      } catch {case ControlFlowMessage(Throw(e)) =>
+        interpretTerm(context, Apply(h, e))
+      }
+    case Break() => throw ControlFlowMessage(Break())
+    case Continue() => throw ControlFlowMessage(Continue())
+    case Throw(e) =>
+      val eI = interpretTerm(context, e)
+      throw ControlFlowMessage(Throw(eI))
+    case Return(t) =>
+      val tI = interpretTerm(context, t)
+      throw ControlFlowMessage(Return(tI))      
     case Print(t) =>
       val tI = interpretTerm(context, t)
-      println(Printer.printTerm(tI))
+      env.out(tI)
       UnitLit()
+    case Read() =>
+      IntLit(env.in())
+  }
+  
+  /** special case of interpretTerm that produces a boolean literal, helpful for While, If etc. */
+  private def interpretBool(context: Context, tm: Term): Boolean = {
+    interpretTerm(context, tm) match {
+      case BoolLit(b) => b
+      case _ => throw Error("not a boolean literal")
+    }
   }
 }
 
@@ -207,7 +325,7 @@ object Closer {
         case None => None
       }
       Val(x, a, vC)
-    case TypeDecl(_) => decl
+    case TypeDecl(_,_) => decl
     case ADTDecl(a, fs) => decl  // no terms may occur in fields at this point
     case IDTDecl(a, cs) => decl  // no terms may occur in constructors at this point
     case Command(tm) => 
@@ -234,6 +352,11 @@ object Closer {
     case Operator(op, args) =>
       val argsC = args.map(a => closeTerm(context, a))
       Operator(op, argsC)
+    case If(c,t,e) => 
+      val cC = closeTerm(context, c)
+      val tC = closeTerm(context, t)
+      val eC = closeTerm(context, e)
+      If(cC,tC,eC)
       
     case LocalDecl(d, t) =>
       val dC = closeDecl(context, d)
@@ -279,5 +402,13 @@ object Closer {
     case Print(t) =>
       val tC = closeTerm(context, t)
       Print(tC)
+    case Read() =>
+      Read()
+    
+    case Break() => Break()
+    case Continue() => Continue()
+    case Return(r) => Return(closeTerm(context, r))
+    case Throw(e) => Return(closeTerm(context, e))
+    case Try(t,h) => Try(closeTerm(context, t), closeTerm(context, h))
   }
 }

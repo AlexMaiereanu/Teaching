@@ -29,10 +29,11 @@ object Main {
 
     println("************************")
     // interpret term against prog
+    val interpreter = new Interpreter(new Environment)
     // first run all code in the declarations
-    val progI = Interpreter.interpretContext(Context(Nil), progC)
+    val progI = interpreter.interpretContext(Context(Nil), progC)
     // then run the main call and print the result
-    val termI = Interpreter.interpretTerm(progI, termC)
+    val termI = interpreter.interpretTerm(progI, termC)
     println("************************")
     
     println("\ncontext after interpretation: \n" + Printer.printContext(progI) + "\n")

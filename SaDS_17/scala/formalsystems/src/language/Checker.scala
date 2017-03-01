@@ -45,18 +45,23 @@ object Checker {
       tOpt.foreach(t => checkType(context, t))
       val (vC,vI) = inferOrCheckType(context, v, tOpt)
       Var(x, Some(vI), vC)
-    case TypeDecl(_) => d
+    case TypeDecl(_,aO) =>
+       aO match {
+         case Some(a) => checkType(context, a)
+         case None => 
+       }
+       d
     case IDTDecl(n, cons) =>
       val asContext = cons.map(c =>
         Val(c.name, Some(FunType(c.argType, TypeRef(n))), None)
       )
-      checkContext(context.and(TypeDecl(n)), Context(asContext))
+      checkContext(context.and(TypeDecl(n, None)), Context(asContext))
       d
     case ADTDecl(n, fields) =>
       val asContext = fields.map(f =>
         Val(f.name, Some(f.tp), None)
       )
-      checkContext(context.and(TypeDecl(n)), Context(asContext))
+      checkContext(context.and(TypeDecl(n, None)), Context(asContext))
       d
   }}
   
@@ -67,7 +72,7 @@ object Checker {
       context.get(n) match {
         case Some(d) => d match {
           // check that n declares a type
-          case TypeDecl(_) =>
+          case TypeDecl(_,_) =>
           case IDTDecl(_,_) =>
           case ADTDecl(_,_) =>
           case _ =>
@@ -76,7 +81,7 @@ object Checker {
         case None =>
           throw Error("not defined: " + n.name)
       }
-    case Int() | Bool() | Unit() =>
+    case b: BaseType =>
       // nothing to do
     case FunType(f,t) =>
       checkType(context, f)
@@ -91,6 +96,17 @@ object Checker {
   // tm is well-formed if we can infer tp such that context |- tm : tp
   def checkTerm(context: Context, tm: Term) {
     inferOrCheckType(context, tm, None)
+  }
+  
+  /**
+   * the smallest type greater than all arguments
+   * even without subtyping, this is needed to handle the type Void
+   */
+  private def leastUpperBound(context: Context, tps: List[Type]): Option[Type] = {
+    tps.filter(tp => tp != Void()) match {
+      case Nil => Some(Void())
+      case hd::tl => if (tl.forall(tp => tp == hd)) Some(hd) else None
+    }
   }
   
   // infers the type tp such that context |- tm : tp
@@ -150,11 +166,23 @@ object Checker {
               case _ => throw Error("ill-typed operator application")
             }
           }
+        } else if (args.length == 1) {
+          (op, types(0)) match {
+            case ("!", Bool()) => Bool()
+            case _ => throw Error("ill-typed operator application")
+          }
         } else {
           throw Error("wrong number of arguments for operator " + op)
         }
         (Operator(op,argsC),tp)
-      
+      case If(c,t,e) => 
+        val (cC,_) = inferOrCheckType(context, c, Some(Bool()))
+        val (tC,tI) = inferOrCheckType(context, t, None)
+        val (eC,eI) = inferOrCheckType(context, e, None)
+        leastUpperBound(context, List(tI, eI)) match {
+          case None => throw Error("types of branches are incompatible")
+          case Some(lub) => (If(cC,tC,eC), lub)
+        }
       // local declarations
       case LocalDecl(d, t) =>
         val dC = checkDecl(context, d)
@@ -202,8 +230,7 @@ object Checker {
       
       //********************
       case loc: Location =>
-        println("Warning: locations should not occur statically")
-        (tm, LocationType(loc.tp))
+        throw Error("locations may not occur statically")
       case Assignment(x, v) => x match {
         case TermRef(n) => context.get(n) match {
           case Some(Var(_,aO,_)) =>
@@ -224,6 +251,7 @@ object Checker {
       case Print(tm) =>
         val (tmC,_) = inferOrCheckType(context, tm, None)
         (Print(tmC), Unit())
+      case Read() => (tm, Int()) // we only read integers for simplicity
       
       case ConsApply(con, arg) =>
         Util.mapFind(context.decls.reverse)(d => d match {
@@ -255,10 +283,10 @@ object Checker {
                    case Some(tpE) =>
                      (tmC,tpE)
                    case None =>
-                     if (casesI.distinct.length == 1)
-                       (tmC,casesI.head)
-                     else
-                       throw Error("cases do not agree in type")
+                      leastUpperBound(context, casesI) match {
+                        case Some(lub) => (tmC,lub)
+                        case None => throw Error("cases do not agree in type")
+                      }
                  }
               case Some(_) => throw Error("not an IDT " + a.name)
               case None => throw Error("unknown type " + a.name)
@@ -300,10 +328,30 @@ object Checker {
           }
           case _ => throw Error("not an atomic type")
         }
+      case Break() =>
+        //TODO
+        (tm, Void())
+      case Continue() =>
+        //TODO
+        (tm, Void())
+      case Return(r) =>
+        //TODO
+        val (rC, _) = inferOrCheckType(context, r, None)
+        (Return(rC), Void())
+      case Throw(e) =>
+        //TODO
+        val (eC, _) = inferOrCheckType(context, e, None)
+        (Throw(eC), Void())
+      case Try(t,h) =>
+        //TODO
+        val (tC, tI) = inferOrCheckType(context, t, None)
+        val (hC, _) = inferOrCheckType(context, h, None)
+        (Try(tC, hC), Void())        
     }
     expected match {
       case Some(tpE) =>
-        if (tmI != tpE)
+        // check that tmI is compatible with (i.e., subype of) tpE
+        if (leastUpperBound(context, List(tmI, tpE)) != Some(tpE))
           throw Error("type mismatch: expected " + Printer.printType(tpE) + "; " + "found: " + Printer.printType(tmI))
       case _ =>
     }

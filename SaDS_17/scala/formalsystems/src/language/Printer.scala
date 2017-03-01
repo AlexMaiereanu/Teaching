@@ -17,7 +17,12 @@ object Printer {
        }
        "val " + printName(n) + aS + vOptS
      // ***************************
-     case TypeDecl(a) => "type " + a.name
+     case TypeDecl(n,aO) =>
+       val aS = aO match {
+         case None => ""
+         case Some(a) => " = " + printType(a)
+       }
+       "type " + n.name + aS
      case IDTDecl(a, cs) =>
        val csS = cs.map(c => printName(c.name) + "(" + printType(c.argType) + ")")
        "data " + a.name + " { " + csS.mkString(" | ") + " }"
@@ -38,6 +43,7 @@ object Printer {
    def printType(t: Type): String = t match {
      case TypeRef(n) => printName(n)
      case Unit() => "unit"
+     case Void() => "void"
      case Int() => "int"
      case Bool() => "bool"
      case FunType(f,t) => "(" + printType(f) + " -> " + printType(t) + ")"
@@ -60,6 +66,7 @@ object Printer {
        } else {
          "(" + op + " " + argsS.mkString(" ") + ")"
        }
+     case If(c,t,e) => "if (" + printTerm(c) + ") " + printTerm(t) + " else " + printTerm(e) 
      case LocalDecl(d,t) => "{" + printDecl(d) + "; " + printTerm(t) + "}"
      case Lambda(x,a,t) =>
        val aS = a match {
@@ -70,10 +77,11 @@ object Printer {
      case Apply(f,a) => printTerm(f) + "(" + printTerm(a) + ")" 
 
      // ***************************
-     case loc: Location => "*" + printName(loc.name) + "[" + printTerm(loc.value) + "]"
+     case loc: Location => "<location:" + loc.hashCode + ">"
      case Assignment(x, v) => printTerm(x) + " = " + printTerm(v)
      case While(c,b) => "while (" + printTerm(c) + ")" + printTerm(b)
      case Print(t) => "print(" + printTerm(t) + ")"
+     case Read() => "read"
      case ConsApply(c,a) => printName(c) + "(" + printTerm(a) + ")"
      case Match(t,cases) =>
        val casesS = cases.map {c =>
@@ -89,5 +97,10 @@ object Printer {
        "new " + a.name + "{" + defsS.mkString(" , ") + "}"
      case Instance(a,defs) => "<instance of type " + printName(a) + "@" + t.hashCode + ">"
      case FieldAccess(t, f) => printTerm(t) + "." + printName(f)
+     case Break() => "break"
+     case Continue() => "continue"
+     case Return(r) => "return " + printTerm(r)
+     case Throw(r) => "throw " + printTerm(r)
+     case Try(t,h) => "try " + printTerm(t) + " catch " + printTerm(h)
    }
 }

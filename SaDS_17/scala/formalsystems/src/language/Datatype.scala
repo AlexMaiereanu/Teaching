@@ -59,14 +59,15 @@ sealed abstract class Decl {
 }
 /** variable definition; value is omitted for local assumptions */
 case class Val(name: Name, tp: Option[Type], value: Option[Term]) extends Decl
-// no type definitions---that makes the language harder to implement
 
 /** types */
 sealed abstract class Type
 case class TypeRef(name: Name) extends Type
-case class Unit() extends Type
-case class Int() extends Type
-case class Bool() extends Type
+sealed abstract class BaseType extends Type
+case class Void() extends BaseType
+case class Unit() extends BaseType
+case class Int() extends BaseType
+case class Bool() extends BaseType
 case class FunType(from: Type, to: Type) extends Type
 //TODO product types, more base types
 
@@ -81,8 +82,10 @@ case class UnitLit() extends Term
 case class BoolLit(value: Boolean) extends Term
 /** integer literals */
 case class IntLit(value: scala.Int) extends Term
-/** convenience for built-in operators for the base types */
+/** unifies all built-in operators for the base types */
 case class Operator(op: String, args: List[Term]) extends Term
+/** if-then-else */
+case class If(cond: Term, then: Term, els: Term) extends Term
 
 /** local declaration in a term */
 case class LocalDecl(decl: Decl, term: Term) extends Term
@@ -97,8 +100,10 @@ case class Apply(fun: Term, args: Term) extends Term
 
 
 object Operator {
-  /** the list of infix operators */
+  /** binary infix operators */
   def builtInInfixOperators = List("+", "-", "*", "div", "mod", "&&", "||", "==", "!=", "<=", ">=", "<", ">")
+  /** other operators and their arity */
+  def builtInOtherOperators = List(("!", 1))
 }
 
 // ********************************************* everything below this line contains extensions to make a programming language
@@ -118,18 +123,29 @@ case class Var(name: Name, tp: Option[Type], init: Term) extends Decl
 
 /** mutable variables */
 case class LocationType(tp: Type) extends Type
-class Location(val name: Name, val tp: Type, var value: Term) extends Term
+abstract class Location extends Term
 case class Assignment(loc: Term, value: Term) extends Term
 
 /** observable side effects */
 case class Print(term: Term) extends Term
+case class Read() extends Term
 
 /** possible non-termination */
 case class While(cond: Term, body: Term) extends Term
 
+// ************************ control flow commands (jumps) that do not return
+sealed abstract class ControlFlowCommand extends Term
+case class Return(value: Term) extends ControlFlowCommand
+case class Break() extends ControlFlowCommand
+case class Continue() extends ControlFlowCommand
+case class Throw(exception: Term) extends ControlFlowCommand
 
-/** type assumptions, needed for IDTDecl and ADTDecl */
-case class TypeDecl(name: Name) extends Decl
+case class Try(value: Term, handler: Term) extends Term
+
+case class ControlFlowMessage(command: ControlFlowCommand) extends java.lang.Throwable
+
+/** type assumptions needed for IDTDecl and ADTDecl */
+case class TypeDecl(name: Name, value: Option[Type]) extends Decl
 
 // ************************ a very simple language for inductive data types
 case class IDTDecl(name: Name, constructors: List[Cons]) extends Decl
