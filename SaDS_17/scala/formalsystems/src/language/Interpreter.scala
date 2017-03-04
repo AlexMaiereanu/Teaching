@@ -1,27 +1,42 @@
 package language
 
-class SimpleLocation(var value: Term) extends Location
+/** the environment abstracts from the underlying programming language or machine */
+abstract class Environment {
+  case class Error(msg: String) extends java.lang.Exception(msg)
+  
+  def add(t: Term): Location
+  def update(loc: Location, t: Term): scala.Unit
+  def get(loc: Location): Term
+  def delete(loc: Location): scala.Unit
+  
+  def out(t: Term ): scala.Unit
+  def in(): scala.Int
+}
 
 /** a simple environment that delegates to the underlying JVM */
-class Environment {
-  /** run-time errors */
-  case class Error(msg: String) extends java.lang.Exception(msg)
+class JVMEnvironment extends Environment {
 
-  def add(t: Term) = new SimpleLocation(t)
+  class JVMLocation(var value: Term) extends Location
+
+  // the environment does not maintain the list of locations
+  // that way the garbage collection of the JVM can be used to deallocate Location objects when our variables are not in scope anymore
+  def add(t: Term) = new JVMLocation(t)
+
   def update(loc: Location, t: Term) {
      loc match {
-       case loc: SimpleLocation => loc.value = t
-       case _ => throw Error("unknown location") // impossible
-     }
-  }
-  def get(loc: Location): Term =  {
-     loc match {
-       case loc: SimpleLocation => loc.value
+       case loc: JVMLocation => loc.value = t
        case _ => throw Error("unknown location") // impossible
      }
   }
   
-  /** garbage collection is inherited from the JVM */
+  def get(loc: Location): Term = {
+     loc match {
+       case loc: JVMLocation => loc.value
+       case _ => throw Error("unknown location") // impossible
+     }
+  }
+  
+  // garbage collection is inherited from the JVM
   def delete(loc: Location) {}
   
   def out(t: Term ) {
@@ -61,30 +76,30 @@ class Interpreter(env: Environment) {
   
   // interpret the definition of a value
   def interpretDecl(context: Context, decl: Decl): Decl = decl match {
+    // *************************** type theory
     case Val(x,aOpt,vOpt) =>
       val aI = aOpt.map(a => interpretType(context, a))
-      vOpt match {
-        case Some(v) =>
-          val vI = interpretTerm(context, v)
-          Val(x,aI,Some(vI))
-        case None =>
-          Val(x,aI,None)
-      }
-    
-    // ***************************
+      val vI = vOpt map(v => interpretTerm(context, v))
+      Val(x,aI,vI)
     case TypeDecl(a,vO) =>
       val vI = vO.map(v => interpretType(context, v))
       TypeDecl(a, vI)
-    case IDTDecl(a, cs) => decl  // no term in constructors
-    case ADTDecl(a, fs) => decl  // no term in fields
-    case Command(tm) =>
-      val tmI = interpretTerm(context, tm)
-      Command(tmI) // can usually be thrown away
+    // *************************** programs
     case Var(x, aO, v) =>
       val vI = interpretTerm(context, v)
-      val loc = env.add(vI)
-      val ltO = aO.map(a => LocationType(interpretType(context, a)))
-      Var(x, ltO, loc)
+      val loc = env.add(vI) // store initial value in environment and use the location as the definition of x 
+      val aI = aO.map(a => interpretType(context, a))
+      Var(x, aI, loc)
+    case Command(tm) =>
+      val tmI = interpretTerm(context, tm)
+      Command(tmI) // can actually be thrown away
+    case RecursiveVal(n,a,v) =>
+      val aI = interpretType(context, a)
+      val vI = interpretTerm(context.and(Val(n,Some(a),None)), v)
+      RecursiveVal(n,aI,vI)
+    // *************************** data types
+    case IDTDecl(a, cs) => decl  // no term in constructors
+    case ADTDecl(a, fs) => decl  // no term in fields
   }
   
   // interpret a type by expanding all definitions (nothing else is needed)
@@ -99,13 +114,15 @@ class Interpreter(env: Environment) {
         }
         case IDTDecl(_,_) => tp
         case ADTDecl(_,_) => tp
-        case _ => throw Error("not a types") // impossible for well-formed types
+        case _ => throw Error("not a type") // impossible for well-formed types
       }
       case None =>
         throw Error("unknown name: " + n.name) // impossible for well-formed types
     }
-    case LocationType(a) => LocationType(interpretType(context, a))
   }
+
+  /** throw for handling control flow operators */
+  case class ControlFlowMessage(command: ControlFlowCommand) extends java.lang.Throwable
   
   // interpret a term by expanding all definitions and running functions
   def interpretTerm(context: Context, tm: Term): Term = tm match {
@@ -117,6 +134,8 @@ class Interpreter(env: Environment) {
             case Some(v) => v
             case None => tm
           }
+          case RecursiveVal(_,_,v) =>
+            v
           case Command(_) =>
             throw Error("unexpected command") // impossible because commands are anonymous
           case Var(_,_,loc) => loc match {
@@ -175,23 +194,24 @@ class Interpreter(env: Environment) {
     case LocalDecl(d, t) =>
       val dI = interpretDecl(context, d)
       val tI = interpretTerm(context.and(dI), t)
-      // true if we can contract the local declaration because it is not referred to anymore
-      val canContract = d match {
-        case Val(_,_,vOpt) => vOpt.isDefined // defined Val's have been expanded in tI
-        // ***********************
-        case Var(_,_,_) => true              // Var's are expanded in tI
-        case Command(_) => true              // Command's can never be referred to anyway
+      // defined declarations can be thrown because they are expanded and thus do not occur in tI anymore
+      val isDefined = d match {
+        case Val(_,_,vOpt) => vOpt.isDefined
         case TypeDecl(_,vOpt) => vOpt.isDefined
+        case Var(_,_,_) => true              // always defined
+        case Command(_) => true              // Command's can never be referred to anyway
+        case RecursiveVal(_,_,_) => true     // always defined
+        // local data types are usually not used anyway
         case IDTDecl(_,_) => false
         case ADTDecl(_,_) => false
       }
-      if (canContract) {
-         dI match {
-           case Var(_,_,l: Location) =>
-             // deallocate local location
-             env.delete(l)
-           case _ =>
-         }
+      // for local mutable variables, we can deallocate the location
+      dI match {
+        case Var(_,_,l: Location) => env.delete(l)
+        case _ =>
+      }
+      // return the term with or without the local declaration depending on isDefined
+      if (isDefined) {
          tI
       } else {
          LocalDecl(dI, tI)
@@ -326,14 +346,19 @@ object Closer {
       }
       Val(x, a, vC)
     case TypeDecl(_,_) => decl
-    case ADTDecl(a, fs) => decl  // no terms may occur in fields at this point
-    case IDTDecl(a, cs) => decl  // no terms may occur in constructors at this point
+
     case Command(tm) => 
       val tmC = closeTerm(context, tm)
       Command(tmC)
     case Var(x,a,v) =>
       val vC = closeTerm(context, v)
       Var(x,a,vC)
+    case RecursiveVal(n,a,v) =>
+      val vC = closeTerm(context, v)
+      RecursiveVal(n,a,vC)
+
+    case ADTDecl(a, fs) => decl  // no terms may occur in fields at this point
+    case IDTDecl(a, cs) => decl  // no terms may occur in constructors at this point
   }
   
   // replace all references to the context with their definition
@@ -372,23 +397,6 @@ object Closer {
       val argC = closeTerm(context, arg)
       Apply(funC, argC)
 
-    case ConsApply(c, arg) => ConsApply(c, closeTerm(context, arg))
-    case Match(t, cases) =>
-      val tC = closeTerm(context, t)
-      val casesC = cases.map {c =>
-        val bodyC = closeTerm(context.and(Val(c.patvar, c.argType, None)), c.body)
-        ConsCase(c.name, c.patvar, c.argType, bodyC)
-      }
-      Match(tC, casesC)
-    case New(a, defs) =>
-      val defsC = defs.map {d =>
-        FieldDef(d.name, d.tp, closeTerm(context, d.definition))
-      }
-      New(a, defsC)
-    case Instance(a, defs) => tm
-    
-    case FieldAccess(t, f) => FieldAccess(closeTerm(context, t), f)
-
     case loc: Location =>
       loc
     case Assignment(x,v) =>
@@ -410,5 +418,22 @@ object Closer {
     case Return(r) => Return(closeTerm(context, r))
     case Throw(e) => Return(closeTerm(context, e))
     case Try(t,h) => Try(closeTerm(context, t), closeTerm(context, h))
+
+    case ConsApply(c, arg) => ConsApply(c, closeTerm(context, arg))
+    case Match(t, cases) =>
+      val tC = closeTerm(context, t)
+      val casesC = cases.map {c =>
+        val bodyC = closeTerm(context.and(Val(c.patvar, c.argType, None)), c.body)
+        ConsCase(c.name, c.patvar, c.argType, bodyC)
+      }
+      Match(tC, casesC)
+    case New(a, defs) =>
+      val defsC = defs.map {d =>
+        FieldDef(d.name, d.tp, closeTerm(context, d.definition))
+      }
+      New(a, defsC)
+    case Instance(a, defs) => tm
+    
+    case FieldAccess(t, f) => FieldAccess(closeTerm(context, t), f)
   }
 }

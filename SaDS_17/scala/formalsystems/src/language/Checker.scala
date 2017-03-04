@@ -9,6 +9,8 @@ object Checker {
   /** checking errors */
   case class Error(msg: String) extends java.lang.Exception(msg)
 
+  // ************************************************************************** contexts
+  
   // |- context
   def checkContext(context: Context, c: Context): Context = {
     val declsC = checkDeclList(context, c.decls, Nil)
@@ -19,44 +21,56 @@ object Checker {
     decls match {
       case Nil => sofar.reverse
       case hd::tl =>
+        println(Printer.printDecl(hd))
         val hdC = checkDecl(context, hd)
         checkDeclList(context.and(hdC), tl, hdC::sofar)
     }    
   }
   
+  // ************************************************************************* declarations
+  
   // context |- d
   def checkDecl(context: Context, d: Decl): Decl = {d match {
-    case Val(n, tOpt, vOpt) =>
-      tOpt.foreach(t => checkType(context, t))
+    case Val(n, aO, vOpt) =>
+      aO.foreach(t => checkType(context, t))
       vOpt match {
         case None =>
-          // not allowed by parser, but may only come up locally
-          // throw Error("uninitialized variable: " + n.name)
-          Val(n, tOpt, vOpt)
+          // not allowed by parser, but may be generated during checking
+          Val(n, aO, vOpt)
         case Some(v) =>
-          val (vC,vI) = inferOrCheckType(context, v, tOpt)
-          Val(n, Some(vI), Some(vC))
+          val (vC,vI) = inferOrCheckType(context, v, aO)
+          Val(n, aO.orElse(Some(vI)), Some(vC))
       }
-    //********************
-    case Command(t) =>
-      val (tC,_) = inferOrCheckType(context, t, None)
-      Command(tC)
-    case Var(x,tOpt,v) =>
-      tOpt.foreach(t => checkType(context, t))
-      val (vC,vI) = inferOrCheckType(context, v, tOpt)
-      Var(x, Some(vI), vC)
-    case TypeDecl(_,aO) =>
+    case TypeDecl(n,aO) =>
        aO match {
          case Some(a) => checkType(context, a)
          case None => 
        }
-       d
+       TypeDecl(n,aO)
+    
+    //******************** programs
+    case Var(x,tOpt,v) =>
+      tOpt.foreach(t => checkType(context, t))
+      val (vC,vI) = inferOrCheckType(context, v, tOpt)
+      Var(x, tOpt.orElse(Some(vI)), vC)
+
+    case Command(t) =>
+      val (tC,_) = inferOrCheckType(context, t, None)
+      Command(tC)
+
+    case RecursiveVal(n,a,v) =>
+      checkType(context, a)
+      val (vC,_) = inferOrCheckType(context.and(Val(n,Some(a),None)), v, Some(a))
+      RecursiveVal(n,a,vC)      
+      
+    //******************** data types
     case IDTDecl(n, cons) =>
       val asContext = cons.map(c =>
         Val(c.name, Some(FunType(c.argType, TypeRef(n))), None)
       )
       checkContext(context.and(TypeDecl(n, None)), Context(asContext))
       d
+
     case ADTDecl(n, fields) =>
       val asContext = fields.map(f =>
         Val(f.name, Some(f.tp), None)
@@ -64,6 +78,8 @@ object Checker {
       checkContext(context.and(TypeDecl(n, None)), Context(asContext))
       d
   }}
+
+  // ************************************************************************* types
   
   // context |- tp : type
   def checkType(context: Context, tp: Type) {tp match {
@@ -86,31 +102,21 @@ object Checker {
     case FunType(f,t) =>
       checkType(context, f)
       checkType(context, t)
-
-    //********************
-    case LocationType(a) =>
-      println("Warning: location types should not occur statically")
-      checkType(context, a)
   }}
+  
+  // ************************************************************************* terms
   
   // tm is well-formed if we can infer tp such that context |- tm : tp
   def checkTerm(context: Context, tm: Term) {
     inferOrCheckType(context, tm, None)
   }
   
-  /**
-   * the smallest type greater than all arguments
-   * even without subtyping, this is needed to handle the type Void
-   */
-  private def leastUpperBound(context: Context, tps: List[Type]): Option[Type] = {
-    tps.filter(tp => tp != Void()) match {
-      case Nil => Some(Void())
-      case hd::tl => if (tl.forall(tp => tp == hd)) Some(hd) else None
-    }
-  }
-  
-  // infers the type tp such that context |- tm : tp
+  // if expected == Some(tp):             check context |- tm : tp
+  // if expected == None    : find tp such that context |- tm : tp
+  // returns the pair (tmC,tp)
+  // tmC is like tm but possible with some improvement (i.e., type inference of variables)
   def inferOrCheckType(context: Context, tm: Term, expected: Option[Type]): (Term,Type) = {
+    // tmC is the improved version of tm; tmI is its inferred type
     val (tmC, tmI) = tm match {
       // names
       case TermRef(n) =>
@@ -126,6 +132,7 @@ object Checker {
               case Some(tp) => (tm,tp)
               case None => throw Error("name with unknown type: " + n.name) // should be impossible
             }
+            case RecursiveVal(_, a, _) => (tm, a)
             case _ => throw Error("not a term: " + n.name)
           }
           case None =>
@@ -183,10 +190,11 @@ object Checker {
           case None => throw Error("types of branches are incompatible")
           case Some(lub) => (If(cC,tC,eC), lub)
         }
+
       // local declarations
       case LocalDecl(d, t) =>
         val dC = checkDecl(context, d)
-        val (tC,tI) = inferOrCheckType(context.and(d), t, expected)
+        val (tC,tI) = inferOrCheckType(context.and(dC), t, expected)
         (LocalDecl(dC,tC), tI)
 
       // function types
@@ -206,6 +214,7 @@ object Checker {
               (Lambda(x, Some(tp), bdC), FunType(tp, bdType))
           }
         }
+
       case Apply(fun,arg) =>
         // turn constructor applications into ConsApply
         fun match {
@@ -228,7 +237,7 @@ object Checker {
             throw Error("non-function applied to argument")
         }
       
-      //********************
+      //******************** programs
       case loc: Location =>
         throw Error("locations may not occur statically")
       case Assignment(x, v) => x match {
@@ -244,15 +253,39 @@ object Checker {
         case _ =>
           throw Error("assignment to non-name")
       }
+      
       case While(cond, body) =>
         val (condC, _) = inferOrCheckType(context, cond, Some(Bool()))
         val (bodyC, _) = inferOrCheckType(context, body, None)
         (While(condC, bodyC), Unit())
+        
       case Print(tm) =>
         val (tmC,_) = inferOrCheckType(context, tm, None)
         (Print(tmC), Unit())
       case Read() => (tm, Int()) // we only read integers for simplicity
       
+      // control flow
+      case Break() =>
+        //TODO
+        (tm, Void())
+      case Continue() =>
+        //TODO
+        (tm, Void())
+      case Return(r) =>
+        //TODO
+        val (rC, _) = inferOrCheckType(context, r, None)
+        (Return(rC), Void())
+      case Throw(e) =>
+        //TODO
+        val (eC, _) = inferOrCheckType(context, e, None)
+        (Throw(eC), Void())
+      case Try(t,h) =>
+        //TODO
+        val (tC, tI) = inferOrCheckType(context, t, None)
+        val (hC, _) = inferOrCheckType(context, h, None)
+        (Try(tC, hC), Void())        
+
+      //******************** data types
       case ConsApply(con, arg) =>
         Util.mapFind(context.decls.reverse)(d => d match {
           case IDTDecl(a, cs) => cs.find(c => c.name == con) flatMap {
@@ -328,35 +361,28 @@ object Checker {
           }
           case _ => throw Error("not an atomic type")
         }
-      case Break() =>
-        //TODO
-        (tm, Void())
-      case Continue() =>
-        //TODO
-        (tm, Void())
-      case Return(r) =>
-        //TODO
-        val (rC, _) = inferOrCheckType(context, r, None)
-        (Return(rC), Void())
-      case Throw(e) =>
-        //TODO
-        val (eC, _) = inferOrCheckType(context, e, None)
-        (Throw(eC), Void())
-      case Try(t,h) =>
-        //TODO
-        val (tC, tI) = inferOrCheckType(context, t, None)
-        val (hC, _) = inferOrCheckType(context, h, None)
-        (Try(tC, hC), Void())        
     }
-    expected match {
-      case Some(tpE) =>
-        // check that tmI is compatible with (i.e., subype of) tpE
-        if (leastUpperBound(context, List(tmI, tpE)) != Some(tpE))
-          throw Error("type mismatch: expected " + Printer.printType(tpE) + "; " + "found: " + Printer.printType(tmI))
-      case _ =>
-    }
+    
+    // ************* finally check that tmI is compatible with (i.e., subype of) the expected type (if given) 
+    expected.foreach(tpE =>
+      if (leastUpperBound(context, List(tmI, tpE)) != Some(tpE))
+        throw Error("type mismatch: expected " + Printer.printType(tpE) + "; " + "found: " + Printer.printType(tmI))
+    )
+    // return the improved term and its inferred type
     (tmC,tmI)
   }
+
+  /**
+   * the smallest type greater than all arguments
+   * even without subtyping, this is needed to handle the type Void
+   */
+  private def leastUpperBound(context: Context, tps: List[Type]): Option[Type] = {
+    tps.filter(tp => tp != Void()) match {
+      case Nil => Some(Void())
+      case hd::tl => if (tl.forall(tp => tp == hd)) Some(hd) else None
+    }
+  }
+  
 }
 
 object Util {

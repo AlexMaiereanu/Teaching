@@ -49,8 +49,12 @@ case class Context(decls: List[Decl]) {
   def get(n: Name): Option[Decl] = decls.reverseIterator.find(d => d.name == n)
 }
 
+// ***************************************************************** Names
+
 /** names (We allow arbitrary strings here, but the parser will accept much less.) */
 case class Name(name: String)
+
+// ***************************************************************** Declarations
 
 /** declarations */
 sealed abstract class Decl {
@@ -60,19 +64,30 @@ sealed abstract class Decl {
 /** variable definition; value is omitted for local assumptions */
 case class Val(name: Name, tp: Option[Type], value: Option[Term]) extends Decl
 
+/** type assumptions needed for IDTDecl and ADTDecl */
+case class TypeDecl(name: Name, value: Option[Type]) extends Decl
+
+
+// ***************************************************************** Types
+
 /** types */
 sealed abstract class Type
 case class TypeRef(name: Name) extends Type
-sealed abstract class BaseType extends Type
+
+sealed abstract class BaseType extends Type // convenience for grouping all base types together
 case class Void() extends BaseType
 case class Unit() extends BaseType
 case class Int() extends BaseType
 case class Bool() extends BaseType
+
 case class FunType(from: Type, to: Type) extends Type
 //TODO product types, more base types
 
+// ***************************************************************** Terms
+
 /** terms */
 sealed abstract class Term
+
 /** names **/
 case class TermRef(name: Name) extends Term
 
@@ -106,35 +121,43 @@ object Operator {
   def builtInOtherOperators = List(("!", 1))
 }
 
-// ********************************************* everything below this line contains extensions to make a programming language
-// ********************************************* all the case distinctions in the other components use the same marker
-// ********************************************* you can ignore those parts on a first read
+// ***************************************************************** extensions for programming languages
 
 // Disclaimer: I'm trying to implement this both systematically and easily-understandable.
 //  That's very hard to combine, and I take some shortcuts that make some other things trickier.
 
-/** commands, i.e., expressions in declaration-position that are executed for their side-effect */
+// ******************************************************************** anonymous declarations
+
+/** a term in declaration-position that is evaluated for its side-effect, but whose result can be thrown away */
 case class Command(term: Term) extends Decl {
-  def name = Name("") // commands are anonymous
+  def name = Name("") // anonymous
 }
 
-/** variable declarations */
+// ******************************************************************** non-termination
+
+case class While(cond: Term, body: Term) extends Term
+
+case class RecursiveVal(name: Name, tp: Type, df: Term) extends Decl
+
+// ******************************************************************* mutable variables
+
 case class Var(name: Name, tp: Option[Type], init: Term) extends Decl
 
-/** mutable variables */
-case class LocationType(tp: Type) extends Type
-abstract class Location extends Term
 case class Assignment(loc: Term, value: Term) extends Term
 
-/** observable side effects */
+/** special terms for the run-time representation of the value of a mutable variable */
+abstract class Location extends Term
+
+// ******************************************************************** I/O
+
 case class Print(term: Term) extends Term
 case class Read() extends Term
 
-/** possible non-termination */
-case class While(cond: Term, body: Term) extends Term
 
-// ************************ control flow commands (jumps) that do not return
-sealed abstract class ControlFlowCommand extends Term
+// ******************************************************************** control flow operators (jumps that do not return)
+
+sealed abstract class ControlFlowCommand extends Term // convenience for grouping all terms that are control flow operators
+
 case class Return(value: Term) extends ControlFlowCommand
 case class Break() extends ControlFlowCommand
 case class Continue() extends ControlFlowCommand
@@ -142,12 +165,9 @@ case class Throw(exception: Term) extends ControlFlowCommand
 
 case class Try(value: Term, handler: Term) extends Term
 
-case class ControlFlowMessage(command: ControlFlowCommand) extends java.lang.Throwable
+// ******************************************************************** extensions for data types
 
-/** type assumptions needed for IDTDecl and ADTDecl */
-case class TypeDecl(name: Name, value: Option[Type]) extends Decl
-
-// ************************ a very simple language for inductive data types
+/** inductive data types */
 case class IDTDecl(name: Name, constructors: List[Cons]) extends Decl
 case class Cons(name: Name, argType: Type)
 
@@ -156,14 +176,15 @@ case class ConsApply(name: Name, argument: Term) extends Term
 case class Match(term: Term, cases: List[ConsCase]) extends Term
 case class ConsCase(name: Name, patvar: Name, argType: Option[Type], body: Term)
 
-// ************************ a very simple language for abstract data types (classes)
+/** abstract data types (classes) */
 case class ADTDecl(name: Name, fields: List[Field]) extends Decl
 case class Field(name: Name, tp: Type)
 
 case class New(cls: Name, definitions: List[FieldDef]) extends Term
-case class FieldDef(name: Name, tp: Option[Type], definition: Term)
 
-/** run-time representation of a New */
+case class FieldDef(name: Name, tp: Option[Type], definition: Term)
+case class FieldAccess(instance: Term, field: Name) extends Term
+
+/** special terms for the run-time representation of an instance of a class */
 case class Instance(cls: Name, definitions: Context) extends Term
 
-case class FieldAccess(instance: Term, field: Name) extends Term

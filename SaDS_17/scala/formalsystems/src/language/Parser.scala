@@ -6,7 +6,7 @@ package language
  */
 class Parser(input: String) {
    
-  /** exception object for parse error */
+  /** exception thrown for parse errors */
   case class Error(msg: String) extends java.lang.Exception(msg + " at position " + pos + ", found " + input.substring(pos))
   
   // *********************** basic access of input
@@ -99,7 +99,20 @@ class Parser(input: String) {
     f(c)
   }
 
-  // *********************** high-level parse functions: one function parseN per non-terminal symbol N
+// *****************************************************************************************
+// high-level parse functions: one function parseN per non-terminal symbol N
+  
+  
+  // *************************************************************************************** names
+  
+  def parseName: Name = {
+    val n = parseNameCharacters
+    if (n == "")
+      throw Error("empty name")
+    Name(n)
+  }
+  
+  // *************************************************************************************** contexts
   
   def parseContext: Context = {
     parseWhitespace
@@ -114,6 +127,8 @@ class Parser(input: String) {
     Context(decls)
   }
    
+  // *************************************************************************************** declarations
+  
   def parseDecl: Decl = {
     parseWhitespace
     if (endOfInput)
@@ -122,20 +137,30 @@ class Parser(input: String) {
       // skip empty line
       parseTerminal("\n")
       parseDecl
-    } else if (startsWith("val ")) {
+    }
+    // ******************** basic type theory
+    else if (startsWith("val ")) {
       parseTerminal("val")
       parseVal
+    } else if (startsWith("type ")) {
+      parseTerminal("type")
+      parseTypeDecl
     }
-    // ********************
-    else if (startsWith("var ")) {
-      parseTerminal("var")
-      parseVar
-    } else if (startsWith("data ")) {
+    // ******************** data types
+    else if (startsWith("data ")) {
       parseTerminal("data")
       parseIDT
     } else if (startsWith("class ")) {
       parseTerminal("class")
       parseADT
+    }
+    // ******************** programs
+    else if (startsWith("var ")) {
+      parseTerminal("var")
+      parseVar
+    } else if (startsWith("recval ")) {
+      parseTerminal("recval")
+      parseRecursiveVal      
     } else {
       val tm = parseTerm
       Command(tm)
@@ -146,30 +171,50 @@ class Parser(input: String) {
   private def parseVal: Val = {
     val n = parseName
     parseWhitespace
-    val tO = if (startsWith(":")) {
+    val aO = if (startsWith(":")) {
        parseTerminal(":")
        Some(parseType)
     } else
       None
     parseTerminal("=")
     val v = parseTerm
-    Val(n,tO,Some(v))
+    Val(n,aO,Some(v))
   }
    
+  // auxiliary function of parseDecl
+  private def parseTypeDecl: TypeDecl = {
+    val n = parseName
+    parseWhitespace
+    parseTerminal("=")
+    val v = parseType
+    TypeDecl(n,Some(v))
+  }
+
   // auxiliary function of parseDecl
   private def parseVar: Var = {
     val n = parseName
     parseWhitespace
-    val tO = if (startsWith(":")) {
+    val aO = if (startsWith(":")) {
        parseTerminal(":")
        Some(parseType)
     } else
       None
     parseTerminal("=")
     val v = parseTerm
-    Var(n,tO,v)
+    Var(n,aO,v)
   }
   
+  // auxiliary function of parseDecl
+  private def parseRecursiveVal: RecursiveVal = {
+    val n = parseName
+    parseTerminal(":")
+    val a = parseType
+    parseTerminal("=")
+    val v = parseTerm
+    RecursiveVal(n,a,v)
+  }
+
+  // auxiliary function of parseDecl
   private def parseIDT: IDTDecl = {
     val n = parseName
     parseTerminal("{")
@@ -194,6 +239,7 @@ class Parser(input: String) {
     ConsCase(n,x,None,b)
   }
   
+  // auxiliary function of parseDecl
   private def parseADT: ADTDecl = {
     val n = parseName
     parseTerminal("{")
@@ -213,6 +259,8 @@ class Parser(input: String) {
     val t = parseTerm
     FieldDef(n,None,t)
   }
+
+  // *************************************************************************************** types
   
   def parseType: Type = {
     parseWhitespace
@@ -227,7 +275,7 @@ class Parser(input: String) {
     } else {
       // name
       val n = parseNameCharacters
-      // some names are predefined, everything else is a TypeRef
+      // some names are reserved, everything else is a TypeRef
       n match {
         case "void" => Void()
         case "unit" => Unit()
@@ -257,14 +305,17 @@ class Parser(input: String) {
     }
   }
 
+  // *************************************************************************************** terms
+  
   def parseTerm: Term = {
     parseWhitespace
     if (endOfInput)
       throw Error("no term found")
-    val c = input(pos)
+    val c = input(pos) // the next character, which will be used to decide what kind of term we find
     var tm = if (c == '(') {
       parseTerminal("(")
       if (startsWith(")")) {
+        // the term ()
         parseTerminal(")")
         UnitLit()
       } else {
@@ -286,19 +337,27 @@ class Parser(input: String) {
     } else if (c == '{') {
       // local declaration
       parseTerminal("{")
-      val d = parseDecl
-      parseTerminal(";")
-      val t = parseTerm
+      val decls = parseList(() => parseDecl, ";") // parse list of declaratons, separated by ;
+      // if the last declaration is not a Command(tm), append a Unit term
+      val (initialDecls, finalTerm) = decls.last match {
+        case Command(t) => (decls.init, t)
+        case _ => (decls, UnitLit())
+      }
       parseTerminal("}")
-      LocalDecl(d, t)
+      // {d1 ; ... ; dn ; t} becomes LocalDecl(d1, ... LocalDecl(dn, t)...)
+      initialDecls.foldRight(finalTerm)(LocalDecl)
     } else if (c == '!') {
+      // boolean negation
       parseTerminal("!")
       val t = parseTerm
       Operator("!", List(t))
     } else {
-      // name, some names are predefined or special, everything else is a TermRef
+      // a name (user-declared or reserved) 
       val n = parseNameCharacters
       n match {
+        // first check all the reserved names
+
+        // type theory
         case "true" =>
           BoolLit(true)
         case "false" =>
@@ -311,6 +370,8 @@ class Parser(input: String) {
           parseTerminal("else")
           val e = parseTerm
           If(c,t,e)
+
+        // programming language
         case "while" =>
           parseTerminal("(")
           val cond = parseTerm
@@ -322,18 +383,10 @@ class Parser(input: String) {
           val t = parseTerm
           parseTerminal(")")
           Print(t)
-        case "new" =>
-          val a = parseName
-          parseTerminal("{")
-          val defs = parseList(() => parseDef, ",")
-          parseTerminal("}")
-          New(a, defs)
-        case "match" =>
-          val t = parseTerm
-          parseTerminal("{")
-          val cases = parseList(() => parseCase, "|")
-          parseTerminal("}")
-          Match(t, cases)
+        case "read" =>
+          Read()
+
+        // control flow
         case "break" => Break()
         case "continue" => Continue()
         case "return" =>
@@ -347,35 +400,52 @@ class Parser(input: String) {
           parseTerminal("catch")
           val h = parseTerm
           Try(t,h)
+
+        // data types
+        case "new" =>
+          val a = parseName
+          parseTerminal("{")
+          val defs = parseList(() => parseDef, ",")
+          parseTerminal("}")
+          New(a, defs)
+        case "match" =>
+          val t = parseTerm
+          parseTerminal("{")
+          val cases = parseList(() => parseCase, "|")
+          parseTerminal("}")
+          Match(t, cases)
+        
+        // everything else is a user-declared name
         case _ =>
           TermRef(Name(n))
       }
     }
+    
     // we have a term now; we check what comes next to decide if we should parse more 
     parseWhitespace
-    while (startsWith(".")) {
-      // projections out of tm or field access
-      parseTerminal(".")
-      if (startsWith(c => c.isDigit)) {
-    	  val n = parseDigits
-    		??? //TODO for product types
+    while (startsWith(".") || startsWith("(")) {
+      if (startsWith(".")) {
+        // projections out of tm or accessing a field of tm
+        parseTerminal(".")
+        if (startsWith(c => c.isDigit)) {
+      	  val n = parseDigits
+      		??? //TODO for product types
+        } else {
+          val n = parseName
+          tm = FieldAccess(tm, n)
+        }
       } else {
-        val n = parseName
-        tm = FieldAccess(tm, n)
+        // function application of tm
+        parseTerminal("(")
+        val arg = parseTerm
+        parseTerminal(")")
+        tm = Apply(tm, arg)          
       }
     }
+    
     parseWhitespace
-    if (startsWith("(")) {
-      // function application of tm
-      parseTerminal("(")
-      val arg = parseTerm
-      parseTerminal(")")
-      Apply(tm, arg)
-    } else if (startsWith("[")) {
-      // TODO for type arguments
-      ???
-    } else if (startsWith(":") || startsWith("=>")) {
-      // lambda abstraction, but only if tm is a variable
+    if (startsWith(":") || startsWith("=>")) {
+      // lambda abstraction, but only allowed if tm is a variable
       tm match {
         case TermRef(x) =>
           val tpO = if (startsWith(":")) {
@@ -398,28 +468,20 @@ class Parser(input: String) {
           val second = parseTerm
           Operator(op, List(tm, second))
         case None =>
-          // ***************** check for an assignment (must come after operators because some operators start with =)
+          // check for an assignment (must come after infix operators because some infix operators start with =)
           if (startsWith("=")) {
              parseTerminal("=")
              val second = parseTerm
              Assignment(tm, second)
           } else {
-            // done
+            // nothing relevant follows, done
             tm
           }
       }
     }
   }
-  
-  def parseName: Name = {
-    val n = parseNameCharacters
-    if (n == "")
-      throw Error("empty name")
-    Name(n)
-  }
-  
 
-  /* not needed, but might come in handy later
+  /* not needed, but might come in handy later for adding polymorphism
   // parses [A_1, ..., A_n], can h
   private def parseTypeArgs: List[Type] = {
     if (startsWith("[")) {

@@ -29,7 +29,7 @@ object Main {
 
     println("************************")
     // interpret term against prog
-    val interpreter = new Interpreter(new Environment)
+    val interpreter = new Interpreter(new JVMEnvironment)
     // first run all code in the declarations
     val progI = interpreter.interpretContext(Context(Nil), progC)
     // then run the main call and print the result
